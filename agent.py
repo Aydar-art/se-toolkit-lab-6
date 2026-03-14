@@ -24,8 +24,9 @@ import traceback
 import httpx
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv('.env.agent.secret')
+# Load environment variables from both files
+load_dotenv('.env.agent.secret')  # LLM credentials
+load_dotenv('.env.docker.secret')  # LMS API key
 
 
 class SecurityError(Exception):
@@ -125,39 +126,42 @@ class Tools:
         except Exception as e:
             return f"Error listing files: {str(e)}"
     
-    async def query_api(self, method: str, path: str, body: str = "") -> str:
+    async def query_api(self, method: str, path: str, body: str = "", auth: bool = True) -> str:
         """
         Send HTTP requests to the deployed backend API.
-        
+
         Args:
             method: HTTP method (GET, POST, PUT, DELETE)
             path: API endpoint path (e.g., '/items/')
             body: Optional JSON request body for POST/PUT
-            
+            auth: Whether to include authentication header (default: True)
+
         Returns:
             JSON string with status_code and body
         """
-        if not self.lms_api_key:
+        # Clean up path
+        if not path.startswith('/'):
+            path = '/' + path
+
+        url = f"{self.api_base_url.rstrip('/')}{path}"
+
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        # Only add auth header if requested and key is available
+        if auth and self.lms_api_key:
+            headers["Authorization"] = f"Bearer {self.lms_api_key}"
+        elif auth and not self.lms_api_key:
             return json.dumps({
                 "status_code": 500,
                 "body": "Error: LMS_API_KEY not configured"
             })
-        
-        # Clean up path
-        if not path.startswith('/'):
-            path = '/' + path
-        
-        url = f"{self.api_base_url.rstrip('/')}{path}"
-        
-        headers = {
-            "Authorization": f"Bearer {self.lms_api_key}",
-            "Content-Type": "application/json"
-        }
-        
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 method_upper = method.upper()
-                
+
                 if method_upper == "GET":
                     response = await client.get(url, headers=headers)
                 elif method_upper == "POST":
@@ -171,13 +175,13 @@ class Tools:
                         "status_code": 400,
                         "body": f"Unsupported method: {method}"
                     })
-                
+
                 # Try to parse response as JSON
                 try:
                     response_body = response.json()
                 except:
                     response_body = response.text
-                
+
                 return json.dumps({
                     "status_code": response.status_code,
                     "body": response_body
@@ -248,13 +252,13 @@ class SystemAgent:
                 "type": "function",
                 "function": {
                     "name": "list_files",
-                    "description": "List files and directories at a given path to discover available files",
+                    "description": "List files and directories at a given path to discover available files. IMPORTANT: path must always be relative to the project root (e.g., 'backend/app/routers' not just 'app/routers')",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "path": {
                                 "type": "string",
-                                "description": "Relative directory path from project root (default: '.')",
+                                "description": "Relative directory path from project root (e.g., 'backend/app/routers', 'wiki'). Use '.' for the project root. IMPORTANT: Always include the full path from project root, not just the subdirectory name.",
                                 "default": "."
                             }
                         }
@@ -282,6 +286,11 @@ class SystemAgent:
                                 "type": "string",
                                 "description": "Optional JSON request body for POST/PUT requests",
                                 "default": ""
+                            },
+                            "auth": {
+                                "type": "boolean",
+                                "description": "Whether to include authentication header. Set to false to test unauthenticated access (default: true)",
+                                "default": True
                             }
                         },
                         "required": ["method", "path"]
@@ -299,22 +308,36 @@ You have access to three tools:
 
 1. list_files(path) - List files in a directory
    Use this to discover what files are available (wiki docs, source code)
+   IMPORTANT: path must ALWAYS be relative to the project root
+   - Correct: 'backend/app/routers', 'wiki', 'backend/app'
+   - Wrong: 'app/routers' (missing 'backend' prefix)
+   - Use '.' to list the project root
 
 2. read_file(path) - Read a file's contents
    Use this to read documentation (wiki/*.md) or source code (*.py)
+   IMPORTANT: path must ALWAYS be relative to the project root
+   - Correct: 'backend/app/main.py', 'wiki/git-workflow.md'
+   - Wrong: 'app/main.py' (missing 'backend' prefix)
 
-3. query_api(method, path, body) - Send HTTP requests to the backend API
+3. query_api(method, path, body, auth) - Send HTTP requests to the backend API
    Use this to:
    - Get real-time system data (item counts, scores, analytics)
    - Check API behavior (status codes, error messages)
    - Verify what the live system returns
+   - Parameters: method (GET/POST/etc), path (endpoint), body (optional JSON), auth (default: true)
+   - Set auth=false to test unauthenticated access (e.g., "What happens without an API key?")
 
 GUIDELINES:
-- For wiki questions → use list_files + read_file on wiki/
-- For source code questions → use list_files + read_file on backend/
-- For system facts (framework, ports) → read source code or query API
-- For data questions (counts, scores) → use query_api
+- For wiki questions → use list_files('wiki') + read_file on relevant wiki docs
+- For source code questions → use list_files('backend/app') or list_files('backend/app/routers') to discover files, then read_file
+- For system facts (framework, ports) → read source code with read_file
+- For data questions (counts, scores) → use query_api with GET method
 - For error diagnosis → query_api first to see error, then read_file to find bug
+
+PATH RULE:
+When you see a directory listing like 'app/\ntests/' from list_files('backend'),
+to explore 'app' you must call list_files('backend/app'), NOT list_files('app').
+Always build paths from the project root.
 
 Always include the source of your answer:
 - For file-based answers: "Source: path/to/file.md#section"
@@ -353,10 +376,16 @@ If you need to chain multiple steps, use tools sequentially and I'll feed result
     
     def _extract_source(self, content: str) -> str:
         """Extract source reference from the LLM response."""
-        lines = content.split('\n')
-        for line in lines:
-            if line.lower().startswith('source:'):
-                return line[7:].strip()
+        import re
+        # Look for various source patterns: "Source:", "**Source**:", "source:", etc.
+        patterns = [
+            r'\*\*Source\*\*:\s*(.+?)(?:\n|$)',  # **Source**: path
+            r'Source:\s*(.+?)(?:\n|$)',  # Source: path
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
         return ""
     
     def _extract_answer(self, content: str) -> str:
@@ -429,7 +458,8 @@ If you need to chain multiple steps, use tools sequentially and I'll feed result
                         method = arguments['method']
                         path = arguments['path']
                         body = arguments.get('body', '')
-                        result = await self.tools.query_api(method, path, body)
+                        auth = arguments.get('auth', True)
+                        result = await self.tools.query_api(method, path, body, auth)
                     else:
                         result = f"Error: Unknown tool '{function_name}'"
                     
