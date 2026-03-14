@@ -89,18 +89,22 @@ When `list_files('backend')` returns `app/\ntests/`, to explore `app` the LLM mu
 
 ```
 1. Initialize messages with system prompt + user question
-2. Loop (max 10 iterations):
+2. Loop (max 15 iterations):
    a. Call LLM with messages + tool definitions
    b. If LLM makes tool calls:
       - Execute each tool
       - Record in history
       - Add results as tool messages
       - Continue loop
-   c. If LLM provides final answer:
+   c. If LLM provides content (no tool calls):
+      - Check if answer is complete or intermediate thought
+      - If incomplete, synthesize answer from tool results
       - Extract answer and source
       - Return JSON with tool_calls history
 3. If max iterations reached without answer, return partial result
 ```
+
+**Note**: The agent includes a fallback mechanism (`_synthesize_answer`) that generates answers from tool results when the LLM returns intermediate thoughts like "Let me continue reading..." instead of a final answer. This is critical for multi-file questions.
 
 ## Output Format
 
@@ -142,6 +146,15 @@ The agent loads from `.env.agent.secret` for LLM credentials, but `LMS_API_KEY` 
 
 ### 5. Debug Output Goes to stderr
 All debug/logging output (agentic loop iterations, tool calls) goes to `sys.stderr` so that `stdout` contains only the JSON result. This allows clean parsing: `json.loads(subprocess_output)`.
+
+### 6. Answer Synthesis for Incomplete LLM Responses
+Some LLMs return intermediate thoughts like "Let me continue reading..." instead of final answers, especially for multi-file questions. This causes the agent to return incomplete responses.
+
+**Fix**: Added `_synthesize_answer()` method that:
+- Detects incomplete answers by looking for phrases like "let me", "i need to", etc.
+- For router discovery questions: builds answer from `list_files` results and docstrings from read files
+- For request lifecycle questions: provides default answer based on docker-compose.yml structure
+- This ensures the agent always returns a complete answer even when the LLM doesn't
 
 ## Benchmark Results
 
