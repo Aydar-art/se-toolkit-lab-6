@@ -337,6 +337,27 @@ GUIDELINES:
 - For request lifecycle questions → read docker-compose.yml, Dockerfile, Caddyfile, and main.py, then trace: Browser → Caddy → FastAPI → Database → back
 - For ETL idempotency questions → read backend/app/etl.py and look for external_id checks or upsert operations
 
+CODE ANALYSIS PATTERNS (IMPORTANT FOR BUG QUESTIONS):
+When asked to find bugs or risky operations in code, look for:
+
+1. DIVISION OPERATIONS: Search for "/" in the code. Check if the denominator could be zero.
+   - Pattern: `x / y` where y might be 0 → ZeroDivisionError risk
+   - Example: `rate = (passed / total) * 100` is risky if total could be 0
+
+2. SORTING WITH NONE VALUES: Search for "sorted(" or ".sort(". Check if the key could return None.
+   - Pattern: `sorted(items, key=lambda x: x.attr)` where attr might be None → TypeError
+   - Example: `sorted(rows, key=lambda r: r.avg_score)` fails if avg_score is None
+
+3. NONE-UNSAFE OPERATIONS: Look for operations on values that could be None.
+   - String methods on potentially None values: `value.strip()`, `value.lower()`
+   - Arithmetic on potentially None values: `value + 1`, `value * 100`
+   - Attribute access on potentially None objects
+
+4. ERROR HANDLING COMPARISON: When comparing error handling between modules:
+   - ETL pipeline (etl.py): Look for try/except blocks, logging, graceful degradation, skipping bad records
+   - API routers: Look for HTTPException raises, status codes, validation errors, early returns
+   - Compare: Does one module silently skip errors while another raises exceptions?
+
 WHEN TO STOP AND ANSWER:
 After you have gathered enough information (e.g., read the docstrings from all router files), STOP making tool calls and provide a COMPLETE final answer.
 Do NOT say "Let me check..." or "I need to read more..." - instead, summarize what you've learned so far.
@@ -357,6 +378,7 @@ ALWAYS include a source reference in your final answer. This is REQUIRED.
 - For wiki questions: "Source: wiki/git-workflow.md" or "Source: wiki/ssh-setup.md"
 - For source code questions: "Source: backend/app/main.py" or "Source: backend/app/routers/analytics.py"
 - For bug diagnosis questions: Include "Source: <path_to_file>" where the bug was found
+- For comparison questions: Cite all files you compared, e.g., "Sources: backend/app/etl.py, backend/app/routers/analytics.py"
 - For pure data questions (counts, scores from API): You can mention the endpoint instead
 
 Format examples:
